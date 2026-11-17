@@ -292,6 +292,29 @@ bool ModelManager::unregister_param_tensors(ModelComponent component, size_t* re
     return unregister_tensor_states(states, registered_tensor_size);
 }
 
+bool ModelManager::release_component_params(ModelComponent component) {
+    std::unordered_set<TensorState*> states;
+    for (auto& state : tensor_states_) {
+        if (state != nullptr && state->component == component) {
+            states.insert(state.get());
+        }
+    }
+    if (states.empty()) {
+        return true;
+    }
+    for (TensorState* state : states) {
+        if (state->pin_count > 0 || state->staged_to_compute_backend) {
+            LOG_WARN("cannot release %s params while tensor '%s' is active",
+                     model_component_name(component), state->name.c_str());
+            return false;
+        }
+        // release_params_storage_blocks 只在 residency 为 Disk 时回收
+        state->residency_mode = ResidencyMode::Disk;
+    }
+    release_params_storage_blocks(false, &states);
+    return true;
+}
+
 bool ModelManager::unregister_param_tensors(const std::vector<ggml_tensor*>& tensors) {
     std::unordered_set<TensorState*> states;
     for (auto tensor : tensors) {

@@ -663,6 +663,11 @@ namespace sd::pipeline {
         int64_t t1 = ggml_time_ms();
         LOG_INFO("get_learned_condition completed, taking %.2fs", (t1 - prepare_start_ms) * 1.0f / 1000);
 
+        // 三个 conditioning 都已取出，后半程只用 embeds，编码器不再需要
+        if (sd->free_conditioner_after_encode) {
+            sd->unload_conditioner();
+        }
+
         ImageGenerationEmbeds embeds;
         embeds.img_uncond = std::move(img_uncond);
         embeds.cond       = std::move(cond);

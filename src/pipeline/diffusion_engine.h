@@ -74,6 +74,11 @@ public:
     float active_flow_shift  = INFINITY;
 
     std::shared_ptr<Conditioner> cond_stage_model;
+    // 编码完成后卸载文本编码器，把常驻内存让给采样阶段。
+    // 由 SD_FREE_TE_AFTER_ENCODE 环境变量开启，默认关闭。
+    bool free_conditioner_after_encode = false;
+    bool unload_conditioner();
+    bool ensure_conditioner_loaded();
     std::shared_ptr<FrozenCLIPVisionEmbedder> clip_vision;  // for svd or wan2.1 i2v
     std::shared_ptr<DiffusionModelRunner> diffusion_model;
     std::shared_ptr<DiffusionModelRunner> high_noise_diffusion_model;

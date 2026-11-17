@@ -102,7 +102,62 @@ static_assert(std::atomic<sd_cancel_mode_t>::is_always_lock_free,
 StableDiffusionGGML::StableDiffusionGGML()
     : rng(std::make_shared<PhiloxRNG>()),
       conditioning_cache_(std::make_unique<ConditioningCache>()),
-      denoiser(std::make_shared<CompVisDenoiser>()) {}
+      denoiser(std::make_shared<CompVisDenoiser>()) {
+    free_conditioner_after_encode = std::getenv("SD_FREE_TE_AFTER_ENCODE") != nullptr;
+}
+
+bool StableDiffusionGGML::unload_conditioner() {
+    if (!cond_stage_model) {
+        return true;
+    }
+    // 只处理 LLM 类 conditioner（MOSS/Qwen-Image/Flux 等共用 LLMEmbedder 的模型）。
+    // CLIP/T5 类不动，避免破坏其它执行路径。
+    if (dynamic_cast<LLMEmbedder*>(cond_stage_model.get()) == nullptr) {
+        return false;
+    }
+    // 释放权重内存但保留张量结构：unregister 会删 TensorState，让
+    // ~GGMLRunner 的 release_session 踩空；直接 evict 只碰 compute staging，
+    // 8GB 主体仍在 params storage 里。
+    conditioning_cache_->clear();
+    // 编码走的是 compute 侧：先递减 pin，否则 release_component_params 会拒绝
+    std::map<std::string, ggml_tensor*> tensor_map;
+    cond_stage_model->get_param_tensors(tensor_map);
+    std::vector<ggml_tensor*> tensors;
+    tensors.reserve(tensor_map.size());
+    for (auto& kv : tensor_map) {
+        if (kv.second != nullptr) {
+            tensors.push_back(kv.second);
+        }
+    }
+    // 顺序：释放 compute staging（清 staged 标志）→ 递减 pin → 释放 params storage
+    model_manager->evict_compute_backend_params(tensors);
+    model_manager->release_compute_backend_params(tensors);
+    if (!model_manager->release_component_params(ModelComponent::Conditioner)) {
+        LOG_WARN("text encoder params still active, skip releasing");
+        return false;
+    }
+    LOG_INFO("released text encoder params after conditioning (%zu tensors)", tensors.size());
+    return true;
+}
+
+bool StableDiffusionGGML::ensure_conditioner_loaded() {
+    if (cond_stage_model) {
+        return true;
+    }
+    if (!free_conditioner_after_encode) {
+        return true;
+    }
+    TokenizerConfig tokenizers(config_->params.tokenizer);
+    cond_stage_model = std::make_shared<LLMEmbedder>(backend_manager.runtime_backend(SDBackendModule::TE),
+                                                     model_manager->loader().get_tensor_storage_map(),
+                                                     version, "", true, model_manager, tokenizers);
+    if (!cond_stage_model) {
+        return false;
+    }
+    cond_stage_model->set_max_graph_vram_bytes(max_graph_vram_bytes_for_module(SDBackendModule::TE));
+    LOG_INFO("reloaded text encoder for conditioning");
+    return true;
+}
 
 StableDiffusionGGML::~StableDiffusionGGML() = default;
 
@@ -1879,6 +1934,9 @@ bool StableDiffusionGGML::apply_loras(const sd_lora_t* loras, uint32_t lora_coun
 }
 
 SDCondition StableDiffusionGGML::get_learned_condition(const ConditionerParams& params) {
+    if (!ensure_conditioner_loaded()) {
+        return {};
+    }
     if (params.prompt_input != nullptr) {
         return conditioning_cache_->get(*cond_stage_model, n_threads, params);
     }

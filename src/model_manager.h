@@ -223,6 +223,10 @@ public:
     ggml_tensor* resolve_param_tensor(ggml_tensor* tensor) const override;
     bool unregister_param_tensors(const std::vector<ggml_tensor*>& tensors);
 
+    // 释放某个组件的权重内存，但保留张量结构与 TensorState，
+    // 下次访问时由 loaded_to_params_backend=false 触发重新加载。
+    bool release_component_params(ModelComponent component);
+
     bool unregister_param_tensors(ModelComponent component,
                                   size_t* registered_tensor_size = nullptr);
 
